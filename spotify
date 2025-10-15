@@ -66,6 +66,7 @@ showHelp () {
     echo "  play                         # Resumes playback where Spotify last left off.";
     echo "  play <song name>             # Finds a song by name and plays it.";
     echo "  play album <album name>      # Finds an album by name and plays it.";
+    echo "  play albums <artist name>    # Lists an artist's albums and lets you choose one to play.";
     echo "  play artist <artist name>    # Finds an artist by name and plays it.";
     echo "  play list <playlist name>    # Finds a playlist by name and plays it.";
     echo "  play uri <uri>               # Play songs from specific uri.";
@@ -250,6 +251,72 @@ while [ $# -gt 0 ]; do
                                 echo "$results" | awk -v random="$random" '/spotify:playlist:[a-zA-Z0-9]+/{i++}i==random{print; exit}' \
                             )
                         fi;;
+
+                    "albums" )
+                        _args=${array[@]:2:$len};
+                        Q=$_args;
+
+                        if ! command -v jq >/dev/null 2>&1; then
+                            cecho "This command requires 'jq'. Please install it (e.g., brew install jq).";
+                            exit 1;
+                        fi
+
+                        getAccessToken;
+
+                        cecho "Searching artist for: $Q";
+
+                        artist_uri=$( \
+                            curl -s -G $SPOTIFY_SEARCH_API \
+                                -H "Authorization: Bearer ${SPOTIFY_ACCESS_TOKEN}" \
+                                -H "Accept: application/json" \
+                                --data-urlencode "q=$Q" \
+                                -d "type=artist&limit=1&offset=0" \
+                            | command grep -E -o "spotify:artist:[a-zA-Z0-9]+" -m 1 \
+                        )
+
+                        if [ -z "$artist_uri" ]; then
+                            cecho "No artist found when searching for $Q";
+                            exit 1;
+                        fi
+
+                        ARTIST_ID=${artist_uri##spotify:artist:}
+
+                        cecho "Fetching albums for artist: $Q";
+
+                        albums_json=$( \
+                            curl -s "https://api.spotify.com/v1/artists/${ARTIST_ID}/albums?include_groups=album&limit=50" \
+                                -H "Authorization: Bearer ${SPOTIFY_ACCESS_TOKEN}" \
+                                -H "Accept: application/json" \
+                        )
+
+                        album_count=$(printf "%s" "$albums_json" | jq '.items | length')
+                        if [ "$album_count" -eq 0 ]; then
+                            cecho "No albums found for $Q";
+                            exit 0;
+                        fi
+
+                        printf "%s" "$albums_json" \
+                            | jq -r '.items | unique_by(.name) | sort_by(.release_date) | to_entries[] | "\(.key+1).\t\(.value.name)\t\(.value.release_date)"' \
+                            | LC_ALL=en_US.UTF-8 column -t -s $'\t'
+
+                        echo
+                        read -p "Choose an album number to play: " choice
+
+                        if ! [[ "$choice" =~ ^[0-9]+$ ]]; then
+                            echo "Invalid selection";
+                            exit 1;
+                        fi
+
+                        sel_uri=$(printf "%s" "$albums_json" \
+                            | jq -r '.items | unique_by(.name) | sort_by(.release_date) | .['"$((choice-1))"'].uri')
+
+                        if [ -z "$sel_uri" ] || [ "$sel_uri" = "null" ]; then
+                            echo "Invalid selection";
+                            exit 1;
+                        fi
+
+                        SPOTIFY_PLAY_URI="$sel_uri"
+                        Q="album selection";;
 
                     "album" | "artist" | "track"    )
                         _args=${array[@]:2:$len};
